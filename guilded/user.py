@@ -55,69 +55,22 @@ from .utils import ISO8601
 from .file import File, MediaType
 
 
-class Device:
-    """Represents a device that the :class:`ClientUser` is logged into.
-
-    Attributes
-    ------------
-    type: :class:`str`
-        The type of device. Could be ``desktop`` or ``mobile``.
-    id: :class:`str`
-        The ID of this device. This is a UUID for mobile devices but an even
-        longer string on desktops.
-    last_online: :class:`datetime.datetime`
-        When this device was last active.
-    active: :class:`bool`
-        Whether this device is "active". This seems to always be ``True``.
-    """
-    def __init__(self, data):
-        self.type = data.get('type')
-        self.id = data.get('id')
-        self.last_online = ISO8601(data.get('lastOnline'))
-        self.active = data.get('isActive', False)
-
 class User(guilded.abc.User, guilded.abc.Messageable):
-    async def block(self):
+    """Represents a Guilded user."""
+    async def send(self, *args, **kwargs):
         """|coro|
 
-        Block this user.
+        Send a message to this user.
+
+        Takes the same parameters as :class:`abc.Messageable.send`, from which
+        this inherits.
+
+        Parameters
+        ------------
+        content: :class:`str`
+            The text content to send.
         """
-        await self._state.block_user(self.id)
-
-    async def unblock(self):
-        """|coro|
-
-        Unblock this user.
-        """
-        await self._state.unblock_user(self.id)
-
-    async def accept_friend_request(self):
-        """|coro|
-
-        Accept this user's friend request, if it exists.
-        """
-        await self._state.accept_friend_request(self.id)
-
-    async def decline_friend_request(self):
-        """|coro|
-
-        Decline this user's friend request, if it exists.
-        """
-        await self._state.decline_friend_request(self.id)
-
-    async def send_friend_request(self):
-        """|coro|
-
-        Send a friend request to this user.
-        """
-        await self._state.create_friend_request([self.id])
-
-    async def delete_friend_request(self):
-        """|coro|
-
-        Delete your friend request to this user, if it exists.
-        """
-        await self._state.delete_friend_request(self.id)
+        return await super().send(*args, **kwargs)
 
 class Member(User):
     """Represents a member of a team.
@@ -190,145 +143,15 @@ class Member(User):
             self.xp = xp
 
 class ClientUser(guilded.abc.User):
-    """Represents the current logged-in user.
+    """Represents the current bot for this :class:`Client`.
 
     Attributes
     ------------
-    devices: List[:class:`Device`]
-        The devices this account is logged in on.
-    accepted_friends: List[:class:`User`]
-        This account's accepted friends. Could be partial (only ID) if the
-        user was not cached.
-    pending_friends: List[:class:`User`]
-        This account's pending friends (requested by this ``ClientUser``).
-        Could be partial (only ID) if the user was not cached.
-    requested_friends: List[:class:`User`]
-        This account's requested friends. Could be partial (only ID) if the
-        user was not cached.
+    id: :class:`str`
+        This bot's ID as provided while constructing the :class:`Client`.
     """
-    def __init__(self, *, state, data):
-        super().__init__(state=state, data=data)
-        user = data.get('user', data)
-
-        self.devices = [Device(device_data) for device_data in user.get('devices', [])]
-        self._accepted_friends = {}
-        self._pending_friends = {}
-        self._requested_friends = {}
-
-        for partial_friend in data.get('friends', []):
-            friend_user = self._state._get_user(partial_friend['friendUserId'])
-            if not friend_user:
-                friend_user = self._state.create_user(
-                    data={'id': partial_friend['friendUserId']},
-                    friend_status=partial_friend['friendStatus'],
-                    friend_created_at=partial_friend['createdAt']
-                )
-            else:
-                friend_user.friend_status = partial_friend['friendStatus']
-                friend_user.friend_requested_at = ISO8601(partial_friend['createdAt'])
-
-            if friend_user.friend_status == 'accepted':
-                self._accepted_friends[friend_user.id] = friend_user
-            elif friend_user.friend_status == 'pending':
-                self._pending_friends[friend_user.id] = friend_user
-            elif friend_user.friend_status == 'requested':
-                self._requested_friends[friend_user.id] = friend_user
-
-    @property
-    def friends(self):
-        """This user's accepted, pending, and requested friends.
-
-        All items in this list are expected to have ``id``, ``friend_status``,
-        and ``friend_requested_at`` attributes at a bare minimum.
-        """
-        return self.accepted_friends + self.pending_friends + self.requested_friends
-
-    @property
-    def accepted_friends(self):
-        return list(self._accepted_friends.values())
-
-    @property
-    def pending_friends(self):
-        return list(self._pending_friends.values())
-
-    @property
-    def requested_friends(self):
-        return list(self._requested_friends.values())
+    #def __init__(self, *, state, data):
+    #    super().__init__(state=state, data=data)
 
     def __repr__(self):
         return f'<ClientUser id={repr(self.id)} name={repr(self.name)}>'
-
-    async def fetch_friends(self):
-        """|coro|
-
-        Fetch a list of this account's accepted, pending, and requested friends.
-
-        Returns
-        ---------
-        List[:class:`User`]
-            This user's accepted, pending, and requested friends.
-        """
-        friends = await self._state.get_friends()
-
-        for friend_data in friends.get('friends', []):
-            friend = self._state.create_user(data=friend_data, friend_status='accepted')
-            self._accepted_friends[friend.id] = friend
-
-        for friend_data in friends.get('friendRequests', {}).get('pending', []):
-            friend = self._state.create_user(data=friend_data, friend_status='pending')
-            self._pending_friends[friend.id] = friend
-
-        for friend_data in friends.get('friendRequests', {}).get('requested', []):
-            friend = self._state.create_user(data=friend_data, friend_status='requested')
-            self._requested_friends[friend.id] = friend
-
-        return self.friends
-
-    async def edit_settings(self, **kwargs):
-        """|coro|
-
-        Change client settings.
-        """
-        payload = {}
-        try:
-            payload['useLegacyNav'] = kwargs.pop('legacy_navigation')
-        except KeyError:
-            pass
-
-    async def edit(self, **kwargs):
-        """|coro|
-
-        Edit your account.
-        """
-        try:
-            avatar = kwargs.pop('avatar')
-        except KeyError:
-            pass
-        else:
-            if avatar is None:
-                image_url = None
-            else:
-                file = File(avatar)
-                file.set_media_type(MediaType.user_avatar)
-                await file._upload(self._state)
-                image_url = file.url
-
-            await self._state.set_profile_images(image_url)
-
-        try:
-            banner = kwargs.pop('banner')
-        except KeyError:
-            pass
-        else:
-            if banner is None:
-                image_url = None
-            else:
-                file = File(banner)
-                file.set_media_type(MediaType.user_banner)
-                await file._upload(self._state)
-                image_url = file.url
-
-            await self._state.set_profile_banner(image_url)
-
-        #payload = {}
-        #await self._state.edit_current_user()

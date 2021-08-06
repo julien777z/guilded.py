@@ -55,18 +55,18 @@ import json
 import logging
 from typing import Union
 
-from . import utils
 from . import channel
 from .embed import Embed
 from .errors import ClientException, HTTPException, error_mapping
 from .file import File
-from .message import Message
+from .message import ChatMessage
 from .user import User, Member
 
 log = logging.getLogger(__name__)
 
 class Route:
-    BASE = 'https://www.guilded.gg/api'
+    BASE = 'https://www.guilded.gg/api/v1'
+    WEBSOCKET_BASE = 'wss://api.guilded.gg/v1/websocket'
     MEDIA_BASE = 'https://media.guilded.gg'
     CDN_BASE = 'https://s3-us-west-2.amazonaws.com/www.guilded.gg'
     NO_BASE = ''
@@ -80,16 +80,14 @@ class Route:
         self.url = self.BASE + path
 
 class HTTPClient:
-    def __init__(self, *, session, max_messages=1000):
+    def __init__(self, *, session, bot_id, max_messages=1000):
         self.session = session
-        self.ws = None
-        self.my_id = None
-
-        self.email = None
-        self.password = None
-        self.cookie = None
-
+        self.my_id = bot_id
         self._max_messages = max_messages
+
+        self.ws = None
+        self.token = None
+
         self._users = {}
         self._teams = {}
         self._emojis = {}
@@ -167,7 +165,7 @@ class HTTPClient:
 
     @property
     def credentials(self):
-        return {'email': self.email, 'password': self.password}
+        return {'Authorization': f'Bearer {self.token}'}
 
     async def request(self, route, **kwargs):
         url = route.url
@@ -175,6 +173,9 @@ class HTTPClient:
 
         async def perform():
             log_data = ''
+            kwargs['headers'] = {
+                **self.credentials
+            }
             if kwargs.get('json'):
                 log_data = f' with {kwargs["json"]}'
             elif kwargs.get('data'):
@@ -226,34 +227,22 @@ class HTTPClient:
 
     # state
 
-    async def login(self, email, password):
-        self.email = email
-        self.password = password
-        response = await self.request(Route('POST', '/login'), json=self.credentials)
-        self.cookie = response.cookies['guilded_mid'].value
-        data = await self.request(Route('GET', '/me'))
-        return data
+    #async def login(self, token):
+    #    self.token = token
+    #    data = await self.request(Route('POST', '/login'), headers=self.credentials)
+    #    #me = await self.request(Route('GET', '/me'))
+    #    #return me
+    #    return data
 
-    async def ws_connect(self, cookie=None, **gateway_args):
-        cookie = cookie or self.cookie
-        if not cookie:
-            raise ClientException(
-                'No authentication cookies available. Get these from '
-                'logging into the REST API at least once '
-                'on this Client.'
-            )
-        gateway_args = {**gateway_args,
-            'jwt': 'undefined',
-            'EIO': '3',
-            'transport': 'websocket',
-            'guildedClientId': cookie
-        }
+    async def ws_connect(self):
+        headers = self.credentials.copy()
+        if self.ws:
+            # we have connected before
+            if self.ws._last_message_id:
+                # catching up with missed messages
+                headers['guilded-last-message-id'] = self.ws._last_message_id
 
-        return await self.session.ws_connect(
-            'wss://api.guilded.gg/socket.io/?{}'.format(
-                '&'.join([f'{key}={val}' for key, val in gateway_args.items()])
-            )
-        )
+        return await self.session.ws_connect(Route.WEBSOCKET_BASE, headers=headers)
 
     def logout(self):
         return self.request(Route('POST', '/logout'))
@@ -264,167 +253,33 @@ class HTTPClient:
     # /channels
     # (message interfacing)
 
-    def send_message(self, channel_id: str, content, extra_payload=None):
+    def create_channel_message(self, channel_id: str, *, content: str):
         route = Route('POST', f'/channels/{channel_id}/messages')
         payload = {
-            'messageId': utils.new_uuid(),
-            'content': {'object': 'value', 'document': {'object': 'document', 'data': {}, 'nodes': []}},
-            **(extra_payload or {})
+            'content': content or None
         }
 
-        for node in content:
-            blank_node = {
-                'object': 'block',
-                'type': None,
-                'data': {},
-                'nodes': []
-            }
-            if isinstance(node, Embed):
-                blank_node['type'] = 'webhookMessage'
-                blank_node['data'] = {'embeds': [node.to_dict()]}
+        return self.request(route, json=payload)
 
-            elif isinstance(node, File):
-                blank_node['type'] = node.file_type
-                blank_node['data'] = {'src': node.url}
-
-            else:
-                # stringify anything else, similar to prev. behavior
-                blank_node['type'] = 'markdown-plain-text'
-                blank_node['nodes'].append({'object':'text', 'leaves': [{'object': 'leaf', 'text': str(node), 'marks': []}]})
-
-            payload['content']['document']['nodes'].append(blank_node)
-
-        return self.request(route, json=payload), payload
-
-    def edit_message(self, channel_id: str, message_id: str, **fields):
+    def update_message(self, channel_id: str, message_id: str, *, content: str):
         route = Route('PUT', f'/channels/{channel_id}/messages/{message_id}')
-        payload = {'content': {'object': 'value', 'document': {'object': 'document', 'data': {}, 'nodes': []}}}
-
-        try:
-            content = fields['content']
-        except KeyError:
-            if fields.get('old_content'):
-                content = fields.get('old_content')
-                payload['content']['document']['nodes'].append({
-                    'object': 'block', 
-                    'type': 'markdown-plain-text', 
-                    'data': {},
-                    'nodes': [{'object':'text', 'leaves': [{'object': 'leaf', 'text': str(content), 'marks': []}]}]
-                })
-        else:
-            payload['content']['document']['nodes'].append({
-                'object': 'block', 
-                'type': 'markdown-plain-text', 
-                'data': {},
-                'nodes': [{'object':'text', 'leaves': [{'object': 'leaf', 'text': str(content), 'marks': []}]}]
-            })
-
-        try:
-            embeds = fields['embeds']
-        except KeyError:
-            if fields.get('old_embeds'):
-                embeds = fields.get('old_embeds')
-                payload['content']['document']['nodes'].append({
-                    'object': 'block',
-                    'type': 'webhookMessage',
-                    'data': {'embeds': embeds},
-                    'nodes': []
-                })
-        else:
-            payload['content']['document']['nodes'].append({
-                'object': 'block',
-                'type': 'webhookMessage',
-                'data': {'embeds': embeds},
-                'nodes': []
-            })
-
-        try:
-            files = fields['files']
-        except KeyError:
-            if fields.get('old_files'):
-                files = fields.get('old_files')
-                for file in files:
-                    payload['content']['document']['nodes'].append({
-                        'object': 'block',
-                        'type': str(file.file_type),
-                        'data': {'src': file.url},
-                        'nodes': []
-                    })
-        else:
-            for file in files:
-                payload['content']['document']['nodes'].append({
-                    'object': 'block',
-                    'type': file.file_type,
-                    'data': {'src': file.url},
-                    'nodes': []
-                })
+        payload = {
+            'content': content or None
+        }
 
         return self.request(route, json=payload)
 
     def delete_message(self, channel_id: str, message_id: str):
         return self.request(Route('DELETE', f'/channels/{channel_id}/messages/{message_id}'))
 
-    def add_message_reaction(self, channel_id: str, message_id: str, emoji_id: int):
-        return self.request(Route('POST', f'/channels/{channel_id}/messages/{message_id}/reactions/{emoji_id}'))
+    def get_channel_message(self, channel_id: str, message_id: str):
+        return self.request(Route('GET', f'/channels/{channel_id}/messages/{message_id}'))
 
-    def remove_self_message_reaction(self, channel_id: str, message_id: str, emoji_id: int):
-        return self.request(Route('DELETE', f'/channels/{channel_id}/messages/{message_id}/reactions/{emoji_id}'))
+    def get_channel_messages(self, channel_id: str):
+        return self.request(Route('GET', f'/channels/{channel_id}/messages'))
 
-    def get_channel_messages(self, channel_id: str, *, limit: int):
-        return self.request(Route('GET', f'/channels/{channel_id}/messages'), params={'limit': limit})
-
-    def create_thread(self, channel_id: str, message_content, *, name: str, initial_message=None):
-        route = Route('POST', f'/channels/{channel_id}/threads')
-        thread_id = utils.new_uuid()
-        payload = {
-            'name': name,
-            'channelId': thread_id,
-            'confirmed': False,
-            'contentType': 'chat',
-            'message': {
-                'id': utils.new_uuid(),
-                'channelId': thread_id,
-                'content': {'object': 'value', 'document': {'object': 'document', 'data': {}, 'nodes': []}}
-            }
-        }
-
-        for node in message_content:
-            blank_node = {
-                'object': 'block',
-                'type': None,
-                'data': {},
-                'nodes': []
-            }
-            if isinstance(node, Embed):
-                blank_node['type'] = 'webhookMessage'
-                blank_node['data'] = {'embeds': [node.to_dict()]}
-
-            elif isinstance(node, File):
-                blank_node['type'] = node.file_type
-                blank_node['data'] = {'src': node.url}
-
-            else:
-                # stringify anything else, similar to prev. behavior
-                blank_node['type'] = 'markdown-plain-text'
-                blank_node['nodes'].append({'object':'text', 'leaves': [{'object': 'leaf', 'text': str(node), 'marks': []}]})
-
-            payload['message']['content']['document']['nodes'].append(blank_node)
-
-        if initial_message:
-            payload['initialThreadMessage'] = initial_message._raw['message'].copy()
-            payload['initialThreadMessage']['botId'] = initial_message.bot_id
-            payload['initialThreadMessage']['webhookId'] = initial_message.webhook_id
-            payload['initialThreadMessage']['channelId'] = initial_message.channel_id
-            payload['initialThreadMessage']['isOptimistic'] = False
-
-            #payload['initialThreadMessage'].pop('isPrivate', None)
-            #payload['initialThreadMessage'].pop('isSilent', None)
-            #payload['initialThreadMessage'].pop('repliesToIds', None)
-            #payload['initialThreadMessage'].pop('repliesTo', None)
-
-            #payload['threadMessageId'] = utils.new_uuid()
-
-        return self.request(route, json=payload)
+    def add_reaction_emote(self, channel_id: str, message_id: str, emoji_id: int):
+        return self.request(Route('PUT', f'/channels/{channel_id}/messages/{message_id}/reactions/{emoji_id}'))
 
     # /teams
 
@@ -633,31 +488,8 @@ class HTTPClient:
     def get_metadata(self, route: str):
         return self.request(Route('GET', '/content/route/metadata'), params={'route': route})
 
-    async def get_channel_message(self, channel_id: str, message_id: str):
-        metadata = await self.get_metadata(f'//channels/{channel_id}/chat?messageId={message_id}')
-        channel = self.create_channel(data=metadata['metadata']['channel'])
-        message = self.create_message(data=metadata['metadata']['message'], channel=channel)
-        return message
-
     def get_channel(self, channel_id: str):
         return self.get_metadata(f'//channels/{channel_id}/chat')
-
-    def get_embed_for_url(self, url: str):
-        return self.request(Route('GET', '/content/embed_info'), params={'url': url})
-
-    def get_form_data(self, form_id: int):
-        if not isinstance(form, int):
-            raise TypeError('form_id must be type int, not %s' % form_id.__class__.__name__)
-        return self.request(Route('GET', f'/content/custom_forms/{form_id}'))
-
-    #def submit_form_response(self, form_id: int, *options):
-    #    #payload = {'responseSpecs': 'values': {}}
-    #    #for option in options:
-    #    #    if option.type is None:pass
-
-    #    return self.request(Route('PUT', f'/content/custom_forms/{form_id}/responses'), json=payload)
-
-    # media.guilded.gg
 
     def upload_file(self, file):
         return self.request(Route('POST', '/media/upload', override_base=Route.MEDIA_BASE),
@@ -669,24 +501,6 @@ class HTTPClient:
         return self.request(Route('POST', f'/webhooks/{webhook_id}/{webhook_token}', override_base=Route.MEDIA_BASE), json=data)
 
     # one-off
-
-    def check_subdomain(self, subdomain: str):
-        return self.request(Route('GET', f'/subdomains/{subdomain}'))
-
-    def search(self, query: str, *, entity_type: str, max_results: int = 20, exclude: list = None):
-        params = {
-            'query': query,
-            'entityType': entity_type,
-            'maxResultsPerType': max_results,
-            'excludedEntityIds': ','.join(exclude or [])
-        }
-        return self.request(Route('GET', '/search'), params=params)
-
-    def get_game_list(self):
-        return self.request(Route('GET', 'https://raw.githubusercontent.com/GuildedAPI/datatables/main/games.json', override_base=Route.NO_BASE))
-
-    def accept_invite(self, invite_code):
-        return self.request(Route('PUT', f'/invites/{invite_code}'), json={'type': 'consume'})
 
     def read_filelike_data(self, filelike):
         return self.request(Route('GET', filelike.url, override_base=Route.NO_BASE))
@@ -707,23 +521,22 @@ class HTTPClient:
     def create_channel(self, **data):
         channel_data = data.get('data', data)
         data['group'] = data.get('group')
-        if channel_data.get('type', '').lower() == 'team':
-            ctype = channel.ChannelType.from_str(channel_data.get('contentType', 'chat'))
-            if ctype is channel.ChannelType.chat:
-                try:
-                    # we assume here that only threads will have this attribute
-                    # so from this we can reasonably know whether a channel is
-                    # a thread or not
-                    channel_data['threadMessageId']
-                except KeyError:
-                    return channel.ChatChannel(state=self, **data)
-                else:
-                    return channel.Thread(state=self, **data)
-            elif ctype is channel.ChannelType.voice:
-                return channel.VoiceChannel(state=self, **data)
+        ctype = channel.ChannelType.from_str(channel_data.get('contentType', 'chat'))
+        if ctype is channel.ChannelType.chat:
+            try:
+                # we assume here that only threads will have this attribute
+                # so from this we can reasonably know whether a channel is
+                # a thread or not
+                channel_data['threadMessageId']
+            except KeyError:
+                return channel.ChatChannel(state=self, **data)
+            else:
+                return channel.Thread(state=self, **data)
+        elif ctype is channel.ChannelType.voice:
+            return channel.VoiceChannel(state=self, **data)
         else:
-            return channel.DMChannel(state=self, **data)
+            return None
 
     def create_message(self, **data):
         data['channel'] = data.get('channel')
-        return Message(state=self, **data)
+        return ChatMessage(state=self, **data)

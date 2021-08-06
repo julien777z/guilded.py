@@ -66,6 +66,7 @@ from .channel import DMChannel, Thread
 from .message import Message
 from .presence import Presence
 from .user import Member, User
+from .utils import ISO8601
 
 log = logging.getLogger(__name__)
 
@@ -75,8 +76,34 @@ class WebSocketClosure(Exception):
     pass
 
 class GuildedWebSocket:
-    """Implements Guilded's global gateway as well as team websocket connections."""
-    HEARTBEAT_PAYLOAD = '2'
+    """Implements Guilded's WebSocket gateway.
+
+    Attributes
+    ------------
+    MISSABLE
+        Receieve only. Denotes either a message that could be missed (contains
+        a message ID to resume with), or a message that is being returned to
+        you because you missed it.
+    WELCOME
+        Received upon connecting to the gateway.
+    RESUME
+        Sent upon resuming and signals that you are caught up with your missed
+        messages.
+    PING
+        Sent as a heartbeat/keepalive.
+    PONG
+        Received as a response to PINGs.
+    socket: :class:`aiohttp.ClientWebSocketResponse`
+        The underlying aiohttp websocket instance.
+    """
+
+    MISSABLE = 0
+    WELCOME = 1
+    RESUME = 2
+    #UNKNOWN = 8
+    PING = 9
+    PONG = 10
+
     def __init__(self, socket, client, *, loop):
         self.client = client
         self.loop = loop
@@ -84,33 +111,30 @@ class GuildedWebSocket:
 
         # ws
         self.socket = socket
-        self._close_code = None
         self.team_id = None
-
-        # actual gateway garbage
         self.sid = None
         self.upgrades = []
-
-        # I'm aware of the python-engineio package but 
-        # have opted not to use it so as to have fewer 
-        # dependencies, and thus fewer links in the chain.
+        self._close_code = None
+        self._last_message_id = None
 
     async def send(self, payload, *, raw=False):
-        if raw is False:
-            payload = f'42{json.dumps(payload)}'
-
+        payload = json.dumps(payload)
         self.client.dispatch('socket_raw_send', payload)
         return await self.socket.send_str(payload)
+
+    async def ping(self):
+        log.debug('Sending heartbeat')
+        await self.send({'op': self.PING})
 
     @property
     def latency(self):
         return float('inf') if self._heartbeater is None else self._heartbeater.latency
 
     @classmethod
-    async def build(cls, client, *, loop=None, **gateway_args):
-        log.info('Connecting to the gateway with args %s', gateway_args)
+    async def build(cls, client, *, loop=None):
+        log.info('Connecting to the gateway')
         try:
-            socket = await client.http.ws_connect(**gateway_args)
+            socket = await client.http.ws_connect()
         except aiohttp.client_exceptions.WSServerHandshakeError as exc:
             log.error('Failed to connect: %s', exc)
             return exc
@@ -118,67 +142,50 @@ class GuildedWebSocket:
             log.info('Connected')
 
         ws = cls(socket, client, loop=loop or asyncio.get_event_loop())
-        ws.team_id = gateway_args.get('teamId')
         ws._parsers = WebSocketEventParsers(client)
-        await ws.send(GuildedWebSocket.HEARTBEAT_PAYLOAD, raw=True)
+        await ws.ping()
         await ws.poll_event()
 
         return ws
 
-    def _pretty_event(self, payload):
-        if isinstance(payload, list):
-            payload = payload[1]
-        if not payload.get('type'):
-            return payload
-
-        return {
-            'type': payload.pop('type'),
-            'data': {k: v for k, v in payload.items()}
-        }
-
-    def _full_event_parse(self, payload):
-        for char in payload:
-            if char.isdigit(): payload = payload.replace(char, '', 1)
-            else: break
-        data = json.loads(payload)
-        return self._pretty_event(data)
-
     async def received_event(self, payload):
-        if payload.isdigit():
-            return
-
         self.client.dispatch('socket_raw_receive', payload)
-        data = self._full_event_parse(payload)
+        #data = self._full_event_parse(payload)
+        data = json.loads(payload)
         self.client.dispatch('socket_response', data)
         log.debug('Received %s', data)
 
-        if data.get('sid') is not None:
-            # hello
-            self.sid = data['sid']
-            self.upgrades = data['upgrades']
-            self._heartbeater = Heartbeater(ws=self, interval=data['pingInterval'] / 1000)
-            # maybe implement timeout later, idk
-            
-            #await self.send(self.HEARTBEAT_PAYLOAD, raw=True)
-            # not sure if a heartbeat should be sent here since it's sent when starting the heartbeater anyway
-            # (doing so results in double heartbeat)
-            self._heartbeater.start()
+        op = data['op']
+        t = data.get('t')
+        d = data.get('d')
+        message_id = data.get('s')
+        if message_id:
+            self._last_message_id = message_id
+
+        if op == self.PONG:
             return
 
-        event = self._parsers.get(data['type'], data['data'])
-        if event is None:
-            # ignore unhandled events
+        if op == self.WELCOME:
+            self._heartbeater = Heartbeater(ws=self, interval=d['heartbeatIntervalMs'] / 1000)
+            self._heartbeater.start()
+            self._last_message_id = d['lastMessageId']
             return
-        try:
-            await event
-        except GuildedException as e:
-            self.client.dispatch('error', e)
-            raise
-        except Exception as e:
-            # wrap error if not already from the lib
-            exc = GuildedException(e)
-            self.client.dispatch('error', exc)
-            raise exc from e
+
+        if op == self.MISSABLE:
+            event = self._parsers.get(t, d)
+            if event is None:
+                # ignore unhandled events
+                return
+            try:
+                await event
+            except GuildedException as e:
+                self.client.dispatch('error', e)
+                raise
+            except Exception as e:
+                # wrap error if not already from the lib
+                exc = GuildedException(e)
+                self.client.dispatch('error', exc)
+                raise exc from e
 
     async def poll_event(self):
         msg = await self.socket.receive()
@@ -207,70 +214,56 @@ class WebSocketEventParsers:
         return coro(data)
 
     async def ChatMessageCreated(self, data):
-        channelId = data.get('channelId', data.get('message', {}).get('channelId'))
-        teamId = data.get('teamId', data.get('message', {}).get('teamId'))
-        createdBy = data.get('createdBy', data.get('message', {}).get('createdBy'))
+        message_data = data['message']
+
+        channelId = message_data.get('channelId')
+        teamId = message_data.get('teamId')
+        createdBy = message_data.get('createdBy')
         channel, author, team = None, None, None
 
-        if channelId is not None:
-            try: channel = await self.client.getch_channel(channelId)
-            except: channel = None
+        #if channelId is not None:
+        #    try: channel = await self.client.getch_channel(channelId)
+        #    except: channel = None
 
-        if teamId is not None:
-            if channel:
-                team = channel.team
-            else:
-                try: team = await self.client.getch_team(teamId)
-                except: team = None
+        #if teamId is not None:
+        #    if channel:
+        #        team = channel.team
+        #    else:
+        #        try: team = await self.client.getch_team(teamId)
+        #        except: team = None
 
-        def create_faux_user():
-            """Create a fake user with only `.id` and `.bot` to cut down on `message.author` being None.
-            Although admittedly this isn't much more useful, it prevents the unexpected type change
-            and helps use cases where only an ID is checked anyway.
-            """
-            return User(state=self._state, data={'id': createdBy}, bot=(data.get('webhookId') is not None or data.get('botId') is not None))
+        author = self._state.create_user(
+            data={'id': createdBy},
+            bot=(message_data.get('createdByWebhookId') is not None or message_data.get('createdByBotId') is not None)
+        )
+        channel = self._state.create_channel(
+            data={'id': channelId, 'type': 'team'}# if teamId else 'dm'}
+            # bots can only be in teams right now
+        )
+        if teamId:
+            team = self._state._get_team(teamId)
 
-        if createdBy is not None and data.get('webhookId') is None and data.get('botId') is None:
-            if channel:
-                try: author = await channel.team.getch_member(createdBy)
-                except:
-                    try: author = await self.client.getch_user(createdBy)
-                    except: author = create_faux_user()
-            elif team:
-                try: author = await team.getch_member(createdBy)
-                except:
-                    try: author = await self.client.getch_user(createdBy)
-                    except: author = create_faux_user()
-            else:
-                try: author = await self.client.getch_user(createdBy)
-                except: author = create_faux_user()
-
-        elif createdBy is not None and (data.get('webhookId') is not None or data.get('botId') is not None):
-            # in the case of webhook/flowbot messages, both webhookId/botId and createdBy are
-            # returned, which i don't really know what to do with. fetching createdBy
-            # as though it's a user will return a seemingly?-valid user object for 'Gil',
-            # so we do it anyway (and skip member fetching, hence separate elif statement).
-            try: author = await self.client.getch_user(createdBy)
-            except: author = create_faux_user()
-            # (for webhooks,) in the future this will probably getch the webhook (with a similar interface to
-            # User) instead, since it makes more sense, but in the meantime, we'll just take
-            # advantage of the createdBy attr that gets returned, even though its probably(?) the same Gil user every time
-
-        if not channel:
-            if data.get('channelType', '').lower() == 'team':
-                try:
-                    channel = await team.getch_channel(channelId)
-                except:
-                    channel = TeamChannel(state=self._state, group=None, data={'id': channelId}, team=team)
-            else:
-                channel = DMChannel(state=self._state, data={'id': channelId, 'users': []})
+        #if createdBy is not None and data.get('webhookId') is None and data.get('botId') is None:
+        #    if channel:
+        #        try: author = await channel.team.getch_member(createdBy)
+        #        except:
+        #            try: author = await self.client.getch_user(createdBy)
+        #            except: author = create_faux_user()
+        #    elif team:
+        #        try: author = await team.getch_member(createdBy)
+        #        except:
+        #            try: author = await self.client.getch_user(createdBy)
+        #            except: author = create_faux_user()
+        #    else:
+        #        try: author = await self.client.getch_user(createdBy)
+        #        except: author = create_faux_user()
 
         message = self._state.create_message(channel=channel, data=data, author=author, team=team)
         self._state.add_to_message_cache(message)
         self.client.dispatch('message', message)
 
     async def ChatChannelTyping(self, data):
-        self.client.dispatch('typing', data['channelId'], data['userId'], datetime.datetime.utcnow())
+        self.client.dispatch('typing', data['channelId'], data['userId'], datetime.datetime.now(datetime.timezone.utc))
 
     async def ChatMessageDeleted(self, data):
         message = self.client.get_message(data['message']['id'])
@@ -282,6 +275,7 @@ class WebSocketEventParsers:
             except:
                 pass
             finally:
+                message.deleted_at = ISO8601(data['message']['deletedAt'])
                 self.client.dispatch('message_delete', message)
 
     async def ChatPinnedMessageCreated(self, data):
@@ -318,10 +312,7 @@ class WebSocketEventParsers:
         if before is None:
             return
 
-        data['webhookId'] = before.webhook_id
-        data['createdAt'] = before.created_at.isoformat(timespec='milliseconds') + 'Z'
-
-        after = Message(state=self.client.http, channel=before.channel, author=before.author, data=data)
+        after = self.client.http.create_message(channel=before.channel, author=before.author, data=data['message'])
         self._state.add_to_message_cache(after)
         self.client.dispatch('message_edit', before, after)
 
@@ -422,8 +413,7 @@ class Heartbeater(threading.Thread):
     def run(self):
         log.debug('Started heartbeat thread')
         while not self._stop_ev.wait(self.interval):
-            log.debug('Sending heartbeat')
-            coro = self.ws.send(GuildedWebSocket.HEARTBEAT_PAYLOAD, raw=True)
+            coro = self.ws.ping()
             f = asyncio.run_coroutine_threadsafe(coro, loop=self.ws.loop)
             try:
                 total = 0

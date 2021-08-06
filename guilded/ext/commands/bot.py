@@ -98,8 +98,8 @@ class Bot(guilded.Client):
     owner_ids: Optional[List[:class:`str`]]
         The users' IDs who own this bot.
     """
-    def __init__(self, *, command_prefix, description=None, **options):
-        super().__init__(**options)
+    def __init__(self, bot_id, *, command_prefix, description=None, **options):
+        super().__init__(bot_id, **options)
         self.command_prefix = command_prefix
         self.description = inspect.cleandoc(description) if description else ''
         self.__extensions = {}
@@ -277,7 +277,7 @@ class Bot(guilded.Client):
         view = StringView(str(message.content))
         ctx = Context(prefix=None, view=view, bot=self, message=message)
 
-        if self._skip_check(message.author.id, self.user.id):
+        if self._skip_check(message.author_id, self.user.id):
             return ctx
 
         prefix = self.command_prefix#await self.get_prefix(message)

@@ -70,123 +70,31 @@ class Messageable(metaclass=abc.ABCMeta):
         self._channel_id = data.get('id')
         self.type = None
 
-    async def send(self, *content, **kwargs):
+    async def send(self, content: str):
         """|coro|
 
         Send a message to a Guilded channel.
 
-        .. note::
-
-            Guilded supports embeds/attachments/strings in any order, which is
-            not practically possible with keyword arguments. For this reason,
-            it is recommended that you pass arguments positionally instead.
-
+        Parameters
+        ------------
+        content: :class:`str`
+            The text content to send.
         """
-        content = list(content)
-        if kwargs.get('file'):
-            file = kwargs.get('file')
-            file.set_media_type(MediaType.attachment)
-            if file.url is None:
-                await file._upload(self._state)
-            content.append(file)
-        for file in kwargs.get('files') or []:
-            file.set_media_type(MediaType.attachment)
-            if file.url is None:
-                await file._upload(self._state)
-            content.append(file)
+        coro = self._state.create_channel_message(self._channel_id, content=content)
+        response = await coro
+        message = self._state.create_message(data=response['message'])
+        return message
 
-        def embed_attachment_uri(embed):
-            # pseudo-support attachment:// URI for use in embeds
-            for slot in [('image', 'url'), ('thumbnail', 'url'), ('author', 'icon_url'), ('footer', 'icon_url')]:
-                url = getattr(getattr(embed, slot[0]), slot[1])
-                if isinstance(url, _EmptyEmbed):
-                    continue
-                if url.startswith('attachment://'):
-                    filename = url.strip('attachment://')
-                    for node in content:
-                        if isinstance(node, File) and node.filename == filename:
-                            getattr(embed, f'_{slot[0]}')[slot[1]] = node.url
-                            content.remove(node)
-                            break
-
-            return embed
-
-        # upload Files passed positionally
-        for node in content:
-            if isinstance(node, File) and node.url is None:
-                node.set_media_type(MediaType.attachment)
-                await node._upload(self._state)
-
-        # handle attachment URIs for Embeds passed positionally
-        # this is a separate loop to ensure that all files are uploaded first
-        for node in content:
-            if isinstance(node, Embed):
-                content[content.index(node)] = embed_attachment_uri(node)
-
-        if kwargs.get('embed'):
-            content.append(embed_attachment_uri(kwargs.get('embed')))
-
-        for embed in kwargs.get('embeds') or []:
-            content.append(embed_attachment_uri(embed))
-
-        message_payload = {}
-        if kwargs.get('reference') and kwargs.get('reply_to'):
-            raise ValueError('Cannot provide both reference and reply_to')
-
-        if kwargs.get('reference'):
-            kwargs['reply_to'] = [kwargs['reference'].id]
-
-        if kwargs.get('reply_to'):
-            if not isinstance(kwargs['reply_to'], list):
-                raise TypeError('reply_to must be type list, not %s' % type(kwargs['reply_to']).__name__)
-
-            message_payload['repliesToIds'] = [message.id for message in kwargs['reply_to']]
-            message_payload['isSilent'] = not kwargs.get('mention_author', True)
-
-        response_coro, payload = self._state.send_message(self._channel_id, content, message_payload)
-        response = await response_coro
-        payload['createdAt'] = response.pop('message', response or {}).pop('createdAt', None)
-        payload['id'] = payload.pop('messageId')
-        try:
-            payload['channelId'] = getattr(self, 'id', getattr(self, 'channel', None).id)
-        except AttributeError:
-            payload['channelId'] = None
-        payload['teamId'] = self.team.id if self.team else None
-        payload['createdBy'] = self._state.my_id
-
-        author = None
-        if payload['teamId'] is not None:
-            args = (payload['teamId'], payload['createdBy'])
-            try:
-                author = self._state._get_team_member(*args) or await self._state.get_team_member(*args, as_object=True)
-            except:
-                author = None
-
-        if author is None or payload['teamId'] is None:
-            try:
-                author = self._state._get_user(payload['createdBy']) or await self._state.get_user(payload['createdBy'], as_object=True)
-            except:
-                author = None
-
-        return Message(state=self._state, channel=self, data=payload, author=author)
-
-    async def trigger_typing(self):
+    async def fetch_messages(self):
         """|coro|
 
-        Begin your typing indicator in this channel.
+        Fetch the last 50 messages sent in this channel.
         """
-        return await self._state.trigger_typing(self._channel_id)
-
-    async def history(self, *, limit: int = 50):
-        """|coro|
-
-        Fetch the message history of this channel.
-        """
-        history = await self._state.get_channel_messages(self._channel_id, limit=limit)
+        history = await self._state.get_channel_messages(self._channel_id)
         messages = []
         for message in history.get('messages', []):
             try:
-                messages.append(Message(state=self._state, channel=self, data=message))
+                messages.append(self._state.create_message(channel=self, data=message))
             except:
                 pass
 
@@ -282,7 +190,7 @@ class TeamChannel(Messageable):
         self.group_id = data.get('groupId') or getattr(self.group, 'id', None)
 
         self.team = extra.get('team') or getattr(group, 'team', None) or self._state._get_team(data.get('teamId'))
-        self.team_id = data.get('teamId') or self.team.id
+        self.team_id = self.team.id if self.team else data.get('teamId')
 
         self.name = data.get('name')
         self.position = data.get('priority')

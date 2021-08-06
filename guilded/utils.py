@@ -64,30 +64,30 @@ GUILDED_EPOCH = int(GUILDED_EPOCH_DATETIME.timestamp())
 valid_image_extensions = ['png', 'webp', 'jpg', 'jpeg', 'gif', 'jif', 'tif', 'tiff', 'apng', 'bmp', 'svg']
 valid_video_extensions = ['mp4', 'mpeg', 'mpg', 'mov', 'avi', 'wmv', 'qt', 'webm']
 
-def ISO8601(string: str):
+def ISO8601(string: str) -> datetime.datetime:
     if string is None:
         return None
 
     try:
-        return datetime.datetime.strptime(string, '%Y-%m-%dT%H:%M:%S.%fZ')
+        dt = datetime.datetime.strptime(string, '%Y-%m-%dT%H:%M:%S.%fZ')
+        return dt.replace(tzinfo=datetime.timezone.utc)
     except:
         try:
-            return datetime.datetime.strptime(string, '%Y-%m-%dT%H:%M:%SZ')
+            dt = datetime.datetime.strptime(string, '%Y-%m-%dT%H:%M:%SZ')
+            return dt.replace(tzinfo=datetime.timezone.utc)
         except:
             pass
         raise TypeError(f'{string} is not a valid ISO8601 datetime.')
 
-def hyperlink(link: str, *, title=None):
+def hyperlink(link: str, *, title: str = None) -> str:
     """A helper function to make links clickable when sent into chat."""
-    return f'[{title or link}]({link})'
+    if title is None:
+        return link
+    return f'[{title}]({link})'
 
-def link(link: str, *, title=None):
+def link(link: str, *, title=None) -> str:
     """Alias of :func:hyperlink."""
     return hyperlink(link, title=title)
-
-def new_uuid():
-    """Generate a new, compliant UUID."""
-    return str(uuid1())
 
 def find(predicate, sequence):
     for element in sequence:
@@ -136,8 +136,9 @@ _MARKDOWN_ESCAPE_COMMON = r'^>(?:>>)?\s|\[.+\]\(.+\)'
 
 _MARKDOWN_ESCAPE_REGEX = re.compile(r'(?P<markdown>%s|%s)' % (_MARKDOWN_ESCAPE_SUBREGEX, _MARKDOWN_ESCAPE_COMMON), re.MULTILINE)
 
-def escape_markdown(text, *, as_needed=False, ignore_links=True):
+def escape_markdown(text: str, *, as_needed: bool = False, ignore_links: bool = True) -> str:
     r"""A helper function that escapes markdown.
+
     Parameters
     -----------
     text: :class:`str`
@@ -153,10 +154,11 @@ def escape_markdown(text, *, as_needed=False, ignore_links=True):
         if a URL in the text contains characters such as ``_`` then it will
         be left alone. This option is not supported with ``as_needed``.
         Defaults to ``True``.
+
     Returns
     --------
     :class:`str`
-        The text with the markdown special characters escaped with a slash.
+        The text with the markdown special characters escaped with a backslash.
     """
     if not as_needed:
         url_regex = r'(?P<url><[^: >]+:\/[^ >]+>|(?:https?|steam):\/\/[^\s<]+[^<.,:;\"\'\]\s])'

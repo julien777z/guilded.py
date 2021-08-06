@@ -1,17 +1,15 @@
-
-__copyright__ = 'shay 2020-2021'
-__version__ = '1.0.0a'
+__copyright__ = 'shay 2020-present'
+__version__ = '2.0.0a'
 
 import logging
 
-from . import abc, utils
+from . import abc
 from .asset import Asset
-from .channel import ChannelType, ChatChannel, DMChannel, Thread
+from .channel import ChannelType, ChatChannel, VoiceChannel, Thread
 from .client import Client
 from .colour import Color, Colour
 from .embed import Embed, EmbedProxy, EmptyEmbed
 from .emoji import Emoji
-from .enums import *
 from .errors import (
     BadRequest,
     ClientException,
@@ -22,11 +20,8 @@ from .errors import (
     NotFound,
     TooManyRequests,
 )
-from .file import File, FileType, MediaType, Attachment
-from .message import Message, MessageMention, MentionType
-from .presence import Presence
-from .status import Game, TransientStatus
+from .message import ChatMessage, Message
 from .team import SocialInfo, Team, TeamTimezone
-from .user import ClientUser, Device, Member, User
+from .user import ClientUser, Member, User
 
 logging.getLogger(__name__).addHandler(logging.NullHandler())

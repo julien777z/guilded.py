@@ -53,7 +53,6 @@ from enum import Enum
 
 import guilded.abc
 
-from .message import Message
 from .utils import ISO8601
 
 
@@ -195,5 +194,5 @@ class DMChannel(guilded.abc.Messageable):
         if data.get('lastMessage'):
             message_data = data.get('lastMessage')
             author = self._state._get_user(message_data.get('createdBy'))
-            message = self._state._get_message(message_data.get('id')) or Message(state=self._state, channel=self, data=message_data, author=author)
+            message = self._state._get_message(message_data.get('id')) or self._state.create_message(channel=self, data=message_data, author=author)
             self.last_message = message
