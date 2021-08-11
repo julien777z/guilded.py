@@ -101,6 +101,15 @@ class Messageable(metaclass=abc.ABCMeta):
         return messages
 
     async def fetch_message(self, id: str):
+        """|coro|
+
+        Fetch a message from this channel.
+
+        Parameters
+        ------------
+        id: :class:`str`
+            The message from the ID
+        """
         message = await self._state.get_channel_message(self._channel_id, id)
         return message
 
@@ -181,7 +190,7 @@ class User(metaclass=abc.ABCMeta):
         self._channel_id = dm._channel_id
         return Messageable(state=self._state, data=dm)
 
-class TeamChannel(Messageable):
+class TeamChannel(metaclass=abc.ABCMeta):
     def __init__(self, *, state, group, data, **extra):
         super().__init__(state=state, data=data)
         #self._state = state

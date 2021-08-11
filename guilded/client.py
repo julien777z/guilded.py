@@ -193,32 +193,55 @@ class Client:
 
     @property
     def dm_channels(self):
-        """List[:class:`.DMChannel`]: The private/dm channels that the connected client can see."""
+        """The private/dm channels that the connected client can see.
+
+        Returns
+        ---------
+        List[:class:`.DMChannel`]
+        """
         return list(self.http._dm_channels.values())
 
     @property
     def private_channels(self):
-        """List[:class:`.DMChannel`]: |dpyattr|
+        """|dpyattr|
 
         This is an alias of :attr:`.dm_channels`.
+
+        Returns
+        ---------
+        List[:class:`DMChannel`]
         """
         return self.dm_channels
 
     @property
     def team_channels(self):
-        """List[:class:`.TeamChannel`]: The team channels that the connected client can see."""
+        """The team channels that the connected client can see.
+
+        Returns
+        ---------
+        List[:class:`TeamChannel`]
+        """
         return list(self.http._team_channels.values())
 
     @property
     def channels(self):
-        """List[Union[:class:`.TeamChannel`, :class:`.DMChannel`]]: The channels (Team and DM included) that the connected client can see."""
+        """The channels (Team and DM included) that the connected client can see.
+
+        Returns
+        ---------
+        List[Union[:class:`TeamChannel`, :class:`DMChannel`]]
+        """
         return [*self.dm_channels, *self.team_channels]
 
     @property
     def guilds(self):
-        """List[:class:`.Team`]: |dpyattr|
+        """|dpyattr|
 
         This is an alias of :attr:`.teams`.
+
+        Returns
+        ---------
+        List[:class:`Team`]
         """
         return self.teams
 
@@ -268,7 +291,7 @@ class Client:
 
         Raises
         --------
-        TypeError
+        :class:`TypeError`
             The function passed is not actually a coroutine.
         """
         if not asyncio.iscoroutinefunction(coro):

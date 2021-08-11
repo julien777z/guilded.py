@@ -70,7 +70,8 @@ class ChannelType(Enum):
     def from_str(self, string):
         return getattr(self, string, None)
 
-class ChatChannel(guilded.abc.TeamChannel):
+class ChatChannel(guilded.abc.TeamChannel, guilded.abc.Messageable):
+    """Represents a chat channel in Guilded."""
     def __init__(self, **fields):
         super().__init__(**fields)
         self.type = ChannelType.chat
@@ -94,11 +95,13 @@ class ChatChannel(guilded.abc.TeamChannel):
         return thread
 
 class VoiceChannel(guilded.abc.TeamChannel):
+    """Represents a voice channel in Guilded."""
     def __init__(self, **fields):
         super().__init__(**fields)
         self.type = ChannelType.voice
 
-class Thread(guilded.abc.TeamChannel):
+class Thread(ChatChannel):
+    """Represents a thread in Guilded."""
     def __init__(self, **fields):
         super().__init__(**fields)
         data = fields.get('data') or fields.get('channel', {})
